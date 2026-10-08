@@ -1,52 +1,56 @@
-from bridge import AssistantBridge
-from Input.text_output import get_input
-from Output.text_output import show_output
+import sys
+from bridge import NanoBridge
 
-
-assistant = AssistantBridge()
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 
 def main():
 
-    print("================================")
-    print("       ASSISTANT BRAIN")
-    print("================================")
-    print("Type 'offline' for local mode")
-    print("Type 'online' for Gemini mode")
-    print("Type 'exit' to stop")
+    nano = NanoBridge()
 
-    online = True
+    print()
+    print("NANO v0.4")
+    print("Local Ollama brain")
+    print()
 
-    while True:
+    try:
 
-        user_input = get_input()
+        while True:
 
-        if user_input.lower() == "exit":
-            print("Assistant stopped.")
-            break
+            user_input = input("You: ")
 
-        if user_input.lower() == "offline":
-            online = False
-            print("→ Offline brain: Qwen")
-            continue
+            if not user_input.strip():
+                continue
 
-        if user_input.lower() == "online":
-            online = True
-            print("→ Online brain: Gemini")
-            continue
+            if user_input.lower() in (
+                "exit",
+                "quit"
+            ):
+                break
 
-        try:
+            if user_input.lower() in (
+                "clear",
+                "reset"
+            ):
+                nano.clear_memory()
+                print("-> Conversation memory cleared.")
+                continue
 
-            response = assistant.process(
-                user_input,
-                online=online
+            response = nano.process(
+                user_input
             )
 
-            show_output(response)
+            print(
+                f"Assistant: {response}"
+            )
 
-        except Exception as error:
+    finally:
 
-            print(f"\nError: {error}")
+        nano.shutdown()
 
 
 if __name__ == "__main__":
