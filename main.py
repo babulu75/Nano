@@ -13,7 +13,7 @@ def main():
     nano = NanoBridge()
 
     print()
-    print("NANO v0.4")
+    print("NANO v0.3")
     print("Local Ollama brain")
     print()
 
