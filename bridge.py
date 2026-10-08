@@ -1,5 +1,9 @@
 from Brain.local import LocalBrain
 from Brain.memory import ConversationMemory
+from Brain.requirement_classifier import (
+    RequirementClassificationError,
+    RequirementClassifier,
+)
 from config import MEMORY_FILE, MAX_MEMORY_TURNS
 
 
@@ -7,13 +11,20 @@ class NanoBridge:
 
     def __init__(self):
 
+        self.classifier = RequirementClassifier()
         self.brain = LocalBrain()
+        self.last_classification = None
         self.memory = ConversationMemory(
             max_turns=MAX_MEMORY_TURNS,
             persist_path=MEMORY_FILE,
         )
 
     def process(self, text: str) -> str:
+
+        try:
+            self.last_classification = self.classifier.classify(text)
+        except RequirementClassificationError as error:
+            return f"[Nano] Requirement classification failed: {error}"
 
         history = self.memory.get_ollama_history()
 
