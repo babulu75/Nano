@@ -4,6 +4,8 @@ from Brain.requirement_classifier import (
     RequirementClassificationError,
     RequirementClassifier,
 )
+import re
+from urllib.parse import urlsplit
 from tools.browser.chrome_manager import ChromeManager
 from tools.browser.research_pipeline import BrowserResearchPipeline, ResearchError, format_evidence
 from config import MEMORY_FILE, MAX_MEMORY_TURNS, debug_log
@@ -64,15 +66,26 @@ class NanoAssistant:
             debug_log("Local model returned an operational error; skipping memory save.")
             return response
 
-        if research_bundle and not any(
-            item.final_url in response for item in research_bundle.evidence
-        ):
-            debug_log("Evidence validation failed: answer did not cite an inspected final URL.")
-            source_list = "\n".join(item.final_url for item in research_bundle.evidence)
-            return (
-                "[Nano] The local model did not cite a page it read, so I can't verify its answer. "
-                "Sources inspected:\n" + source_list
-            )
+        if research_bundle:
+            extracted_urls = {
+                url.rstrip(".,;:)")
+                for item in research_bundle.evidence
+                for url in re.findall(r"https?://[^\s<>\]\[\"']+", item.text)
+            }
+            extracted_urls = {
+                url for url in extracted_urls
+                if urlsplit(url).hostname and "." in urlsplit(url).hostname
+            }
+            if not any(url in response for url in extracted_urls):
+                # Keep the answer useful if Ollama paraphrases or formats a citation
+                # differently from the source links shown by Google AI Mode.
+                source_urls = sorted(extracted_urls)[:5] or [
+                    item.final_url for item in research_bundle.evidence
+                ]
+                response += "\n\nSources shown by Google AI Mode:\n" + "\n".join(
+                    f"- {url}" for url in source_urls
+                )
+                debug_log(f"Added Google AI Mode source links; source_count={len(source_urls)}.")
 
         self.memory.add_exchange(text, response, model="ollama")
         debug_log("Answer completed and saved to conversation memory.")

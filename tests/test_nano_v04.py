@@ -10,6 +10,7 @@ from Brain.local import think_local
 from Brain.requirement_classifier import RequirementClassifier
 from assistant import NanoAssistant
 from tools.browser.chrome_manager import ChromeManager
+from tools.browser.google_ai_mode import GoogleAiAnswer, GoogleAiMode, GoogleAiModeError
 from tools.browser.page_reader import PageReadError, PageReader
 from tools.browser.research_pipeline import BrowserResearchPipeline, ResearchBundle, ResearchError, format_evidence
 from tools.browser.search_engine import (
@@ -51,6 +52,9 @@ class FakeLink:
     async def inner_text(self, timeout=None):
         return self.title
 
+    async def is_visible(self):
+        return True
+
     async def get_attribute(self, name):
         return self.href if name == "href" else None
 
@@ -83,6 +87,78 @@ class FakePage:
             if callable(effect):
                 effect(self, url)
         self.url = self.redirect_to or url
+
+
+class FakeComposer:
+    def __init__(self):
+        self.value = None
+        self.key = None
+
+    async def is_visible(self):
+        return True
+
+    async def fill(self, value):
+        self.value = value
+
+    async def press(self, key):
+        self.key = key
+
+
+class FakeCopyButton:
+    async def wait_for(self, state=None, timeout=None):
+        return None
+
+    async def click(self):
+        return None
+
+
+class FakeAiModePage:
+    def __init__(self):
+        self.context = Mock()
+        self.context.grant_permissions = AsyncMock()
+        self.url = "https://www.google.com/search?udm=50&aep=11&q=question"
+        self.composer = FakeComposer()
+        self.copy_button = FakeCopyButton()
+        self.copy_button.last = self.copy_button
+        self.source_link = FakeLink("Apple Leadership", "https://www.apple.com/leadership/")
+        self.clipboard = "Tim Cook is Apple's CEO."
+        self.goto_calls = []
+
+    def locator(self, selector):
+        if selector.startswith("textarea"):
+            return FakeLocator([self.composer])
+        if selector.startswith("button["):
+            return self.copy_button
+        if selector == "a[href^='http']":
+            return FakeLocator([self.source_link])
+        return FakeLocator()
+
+    async def goto(self, url, wait_until=None, timeout=None):
+        self.goto_calls.append((url, wait_until, timeout))
+
+    async def wait_for_timeout(self, timeout):
+        return None
+
+    async def evaluate(self, expression):
+        assert expression == "() => navigator.clipboard.readText()"
+        return self.clipboard
+
+
+def test_google_ai_mode_copies_answer_and_collects_citation_links():
+    page = FakeAiModePage()
+    answer = asyncio.run(GoogleAiMode().ask(page, "who is Apple CEO"))
+    assert answer.text == "Tim Cook is Apple's CEO."
+    assert answer.citations == ["https://www.apple.com/leadership/"]
+    assert page.composer.value == "who is Apple CEO"
+    assert page.composer.key == "Enter"
+    page.context.grant_permissions.assert_awaited_once_with(
+        ["clipboard-read", "clipboard-write"], origin="https://www.google.com"
+    )
+
+
+def test_google_ai_mode_unwraps_google_redirect_source_links():
+    link = "https://www.google.com/url?q=https%3A%2F%2Fwww.apple.com%2Fleadership%2F"
+    assert GoogleAiMode._unwrap_google_link(link) == "https://www.apple.com/leadership/"
 
 
 def evidence(url="https://example.com/article", text="Apple's price was $100.", **kwargs):
@@ -276,7 +352,7 @@ def test_bridge_web_request_passes_browser_evidence_to_local_model():
     bridge.researcher.research.assert_awaited_once_with("current fact")
 
 
-def test_web_answer_without_a_source_citation_is_rejected_and_not_saved():
+def test_web_answer_without_a_source_citation_keeps_answer_and_appends_sources():
     bridge = NanoAssistant()
     bridge.memory = ConversationMemory(max_turns=2)
     bridge.classifier = Mock()
@@ -286,9 +362,10 @@ def test_web_answer_without_a_source_citation_is_rejected_and_not_saved():
     bridge.researcher = Mock()
     bridge.researcher.research = AsyncMock(return_value=ResearchBundle([evidence()], []))
     result = run_assistant(bridge, "Who is the CEO of Apple?")
-    assert "did not cite a page it read" in result
+    assert "The answer is Tim Cook" in result
+    assert "Sources shown by Google AI Mode:" in result
     assert "https://example.com/article" in result
-    assert bridge.memory.count() == 0
+    assert bridge.memory.count() == 2
 
 
 def test_bridge_reports_insufficient_browser_evidence_without_answering():
@@ -419,16 +496,16 @@ def test_research_pipeline_closes_task_tab_but_keeps_shared_browser_after_error(
     manager.new_page = AsyncMock(return_value=page)
     manager.close_page = AsyncMock(side_effect=ChromeManager.close_page)
     manager.close = AsyncMock()
-    search = Mock()
-    search.search = AsyncMock(side_effect=RuntimeError("unexpected"))
-    pipeline = BrowserResearchPipeline(chrome_manager=manager, search_engine=search)
+    ai_mode = Mock()
+    ai_mode.ask = AsyncMock(side_effect=RuntimeError("unexpected"))
+    pipeline = BrowserResearchPipeline(chrome_manager=manager, ai_mode=ai_mode)
     with pytest.raises(ResearchError):
         asyncio.run(pipeline.research("question"))
     manager.close_page.assert_awaited_once_with(page)
     manager.close.assert_not_awaited()
 
 
-def test_research_pipeline_reads_no_more_than_page_limit():
+def test_research_pipeline_uses_copied_ai_mode_answer_and_citations():
     context = Mock()
     context.new_page = AsyncMock(return_value=FakePage())
     manager = Mock()
@@ -436,14 +513,17 @@ def test_research_pipeline_reads_no_more_than_page_limit():
     manager.new_page = AsyncMock(return_value=context.new_page.return_value)
     manager.close_page = AsyncMock(side_effect=ChromeManager.close_page)
     manager.close = AsyncMock()
-    search = Mock()
-    search.search = AsyncMock(return_value=[SearchResult(str(i), f"https://example.com/{i}") for i in range(5)])
-    reader = Mock()
-    reader.read = AsyncMock(side_effect=lambda _page, result: evidence(result.url, "Readable"))
-    pipeline = BrowserResearchPipeline(manager, search, reader, max_pages=2)
+    ai_mode = Mock()
+    ai_mode.ask = AsyncMock(return_value=GoogleAiAnswer(
+        "The answer is 42.", "https://www.google.com/search?udm=50&aep=11&q=test",
+        ["https://example.com/source"],
+    ))
+    pipeline = BrowserResearchPipeline(manager, ai_mode)
     bundle = asyncio.run(pipeline.research("question"))
-    assert len(bundle.evidence) == 2
-    assert reader.read.await_count == 2
+    assert len(bundle.evidence) == 1
+    assert "The answer is 42." in bundle.evidence[0].text
+    assert "https://example.com/source" in bundle.evidence[0].text
+    ai_mode.ask.assert_awaited_once_with(context.new_page.return_value, "question")
     manager.close_page.assert_awaited_once()
 
 
@@ -456,11 +536,11 @@ def test_research_pipeline_reuses_shared_browser_and_closes_it_at_shutdown():
     manager.new_page = AsyncMock(side_effect=pages)
     manager.close_page = AsyncMock(side_effect=ChromeManager.close_page)
     manager.close = AsyncMock()
-    search = Mock()
-    search.search = AsyncMock(return_value=[SearchResult("Article", "https://example.com/article")])
-    reader = Mock()
-    reader.read = AsyncMock(return_value=evidence(text="Readable."))
-    pipeline = BrowserResearchPipeline(manager, search, reader)
+    ai_mode = Mock()
+    ai_mode.ask = AsyncMock(return_value=GoogleAiAnswer(
+        "Readable answer.", "https://www.google.com/search?udm=50&aep=11&q=test", []
+    ))
+    pipeline = BrowserResearchPipeline(manager, ai_mode)
 
     async def use_shared_browser():
         await pipeline.research("first query")
@@ -482,11 +562,11 @@ def test_research_pipeline_enforces_total_evidence_character_limit():
     manager.new_page = AsyncMock(return_value=context.new_page.return_value)
     manager.close_page = AsyncMock(side_effect=ChromeManager.close_page)
     manager.close = AsyncMock()
-    search = Mock()
-    search.search = AsyncMock(return_value=[SearchResult(str(i), f"https://example.com/{i}") for i in range(2)])
-    reader = Mock()
-    reader.read = AsyncMock(side_effect=lambda _page, result: evidence(result.url, "abcdefghij"))
-    pipeline = BrowserResearchPipeline(manager, search, reader, max_pages=2, max_total_chars=7)
+    ai_mode = Mock()
+    ai_mode.ask = AsyncMock(return_value=GoogleAiAnswer(
+        "abcdefghij", "https://www.google.com/search?udm=50&aep=11&q=test", []
+    ))
+    pipeline = BrowserResearchPipeline(manager, ai_mode, max_total_chars=7)
     bundle = asyncio.run(pipeline.research("question"))
     assert sum(len(item.text) for item in bundle.evidence) == 7
 
@@ -525,20 +605,43 @@ def test_chrome_manager_reuses_visible_profile_and_opens_reusable_tabs(tmp_path)
 
 
 @pytest.mark.integration
-def test_chrome_search_integration_is_explicitly_opt_in():
+def test_google_ai_mode_integration_is_explicitly_opt_in():
     import os
     if os.getenv("NANO_RUN_INTEGRATION") != "1":
-        pytest.skip("Set NANO_RUN_INTEGRATION=1 to launch visible Chrome and access the internet.")
+        pytest.skip("Set NANO_RUN_INTEGRATION=1 to launch visible Chrome and access Google AI Mode.")
     async def research_and_close():
         pipeline = BrowserResearchPipeline()
         try:
-            return await pipeline.research("site:example.com Nano browser test")
+            return await pipeline.research("Who is the CEO of Apple?")
         finally:
             await pipeline.close()
 
     bundle = asyncio.run(research_and_close())
     assert bundle.evidence
     assert all(item.final_url.startswith("http") for item in bundle.evidence)
+    assert "Google AI Mode answer" in bundle.evidence[0].title
+    assert len(bundle.evidence[0].text) > 40
+    assert "Sources shown by Google AI Mode:" in bundle.evidence[0].text
+
+
+@pytest.mark.integration
+def test_google_ai_mode_answer_flows_into_ollama():
+    import os
+    if os.getenv("NANO_RUN_GOOGLE_OLLAMA_INTEGRATION") != "1":
+        pytest.skip("Set NANO_RUN_GOOGLE_OLLAMA_INTEGRATION=1 to run visible Chrome, Google AI Mode, and local Ollama together.")
+
+    async def research_and_close():
+        pipeline = BrowserResearchPipeline()
+        try:
+            return await pipeline.research("Who is the CEO of Apple?")
+        finally:
+            await pipeline.close()
+
+    bundle = asyncio.run(research_and_close())
+    assert "Sources shown by Google AI Mode:" in bundle.evidence[0].text
+    answer = think_local("Who is the CEO of Apple?", tool_context=format_evidence(bundle))
+    assert answer.strip()
+    assert not answer.startswith("[Nano]")
 
 
 @pytest.mark.integration

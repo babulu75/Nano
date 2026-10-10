@@ -11,8 +11,8 @@ main.py (CLI)
         -> local request: Brain/local.py -> Ollama
         -> web request: tools/browser/research_pipeline.py
               -> shared tools/browser/chrome_manager.py
-              -> search -> read pages -> validate evidence
-           -> Brain/local.py -> Ollama with evidence
+              -> Google AI Mode -> copy answer + collect citations
+           -> Brain/local.py -> Ollama summarizes answer with citations
      -> Brain/memory.py (save completed conversation)
 ```
 
@@ -27,7 +27,7 @@ Nano/
 ├── config.py               # Local model, memory, and central DEBUG_LOGS switch
 ├── Brain/                  # Requirement classifier, Ollama answer model, conversation memory
 ├── tools/
-│   └── browser/            # Shared Chrome lifecycle, search, page reading, evidence validation
+│   └── browser/            # Shared Chrome lifecycle, Google AI Mode, evidence validation
 ├── models/                 # Data passed between tools and the assistant
 ├── scripts/                # Manual developer smoke tests
 └── tests/                  # Automated unit and opt-in integration tests
