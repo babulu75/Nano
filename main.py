@@ -1,5 +1,7 @@
+import asyncio
 import sys
-from bridge import NanoBridge
+from assistant import NanoAssistant
+from config import debug_log
 
 if sys.platform == "win32":
     try:
@@ -8,20 +10,23 @@ if sys.platform == "win32":
         pass
 
 
-def main():
+async def run_nano():
 
-    nano = NanoBridge()
+    # Feature: terminal lifecycle diagnostics — Nano v0.4 — Purpose: include startup and exit events in the central debug switch.
+    debug_log("Nano CLI starting.")
+
+    nano = NanoAssistant()
 
     print()
-    print("NANO v0.3")
-    print("Local Ollama brain")
+    print("NANO v0.4")
+    print("Local Ollama brain + visible Chrome web research")
     print()
 
     try:
 
         while True:
 
-            user_input = input("You: ")
+            user_input = await asyncio.to_thread(input, "You: ")
 
             if not user_input.strip():
                 continue
@@ -30,6 +35,7 @@ def main():
                 "exit",
                 "quit"
             ):
+                debug_log("Nano CLI exit requested.")
                 break
 
             if user_input.lower() in (
@@ -40,17 +46,19 @@ def main():
                 print("-> Conversation memory cleared.")
                 continue
 
-            response = nano.process(
-                user_input
-            )
+            response = await nano.process(user_input)
 
             print(
                 f"Assistant: {response}"
             )
 
     finally:
+        debug_log("Nano CLI shutting down.")
+        await nano.shutdown()
 
-        nano.shutdown()
+
+def main():
+    asyncio.run(run_nano())
 
 
 if __name__ == "__main__":

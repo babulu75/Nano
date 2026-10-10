@@ -3,13 +3,14 @@ import json
 import time
 from typing import List, Dict, Optional
 from dataclasses import dataclass, asdict, field
+from config import debug_log, error_log
 
 
 @dataclass
 class Message:
     role: str  # "user", "assistant", or "system"
     content: str
-    model: Optional[str] = None  # e.g., "gemini", "ollama"
+    model: Optional[str] = None  # Stored provider label; current Nano answers use Ollama.
     timestamp: float = field(default_factory=time.time)
 
 
@@ -47,6 +48,15 @@ class ConversationMemory:
         self._messages.append(
             Message(role="assistant", content=content, model=model)
         )
+        self._trim()
+        self._auto_save()
+
+    # Feature: atomic conversation turn storage — Nano v0.4 — Purpose: persist one completed user/assistant exchange with a single memory write.
+    def add_exchange(self, user_text: str, assistant_text: str, model: Optional[str] = None) -> None:
+        self._messages.extend((
+            Message(role="user", content=user_text),
+            Message(role="assistant", content=assistant_text, model=model),
+        ))
         self._trim()
         self._auto_save()
 
@@ -97,20 +107,24 @@ class ConversationMemory:
 
     def save(self) -> None:
         """Persist conversation to JSON file."""
+        # Feature: memory persistence diagnostics — Nano v0.4 — Purpose: log routine persistence only in debug mode while surfacing essential save failures.
         if not self.persist_path:
             return
         try:
+            debug_log(f"Saving conversation memory; turns={len(self._messages)}; path={self.persist_path}.")
             os.makedirs(os.path.dirname(os.path.abspath(self.persist_path)), exist_ok=True)
             with open(self.persist_path, "w", encoding="utf-8") as f:
                 json.dump([asdict(m) for m in self._messages], f, indent=2, ensure_ascii=False)
         except Exception as e:
-            print(f"[Memory] Failed to save memory: {e}")
+            error_log(f"Failed to save conversation memory: {e}")
 
     def load(self) -> None:
         """Load conversation from JSON file."""
+        # Feature: memory restoration diagnostics — Nano v0.4 — Purpose: trace preserved memory loading without noisy default terminal output.
         if not self.persist_path or not os.path.exists(self.persist_path):
             return
         try:
+            debug_log(f"Loading conversation memory; path={self.persist_path}.")
             with open(self.persist_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 self._messages = [
@@ -122,5 +136,6 @@ class ConversationMemory:
                     )
                     for item in data
                 ]
+            debug_log(f"Conversation memory loaded; turns={len(self._messages)}.")
         except Exception as e:
-            print(f"[Memory] Failed to load memory: {e}")
+            error_log(f"Failed to load conversation memory: {e}")

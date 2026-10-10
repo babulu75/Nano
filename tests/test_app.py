@@ -1,5 +1,6 @@
+import asyncio
 import unittest
-from unittest.mock import Mock, mock_open, patch
+from unittest.mock import ANY, Mock, mock_open, patch
 import json
 
 import requests
@@ -11,7 +12,11 @@ from Brain.requirement_classifier import (
     RequirementClassificationError,
     RequirementClassifier,
 )
-from bridge import NanoBridge
+from assistant import NanoAssistant
+
+
+def run_assistant(assistant, text):
+    return asyncio.run(assistant.process(text))
 
 
 class ConversationMemoryTests(unittest.TestCase):
@@ -50,6 +55,19 @@ class ConversationMemoryTests(unittest.TestCase):
             ],
         )
 
+    def test_add_exchange_persists_one_completed_turn_once(self):
+        memory = ConversationMemory(max_turns=2, persist_path="memory-test.json")
+        with patch.object(memory, "save") as save:
+            memory.add_exchange("question", "answer", model="ollama")
+        save.assert_called_once_with()
+        self.assertEqual(
+            memory.get_ollama_history(),
+            [
+                {"role": "user", "content": "question"},
+                {"role": "assistant", "content": "answer"},
+            ],
+        )
+
     def test_drops_blank_assistant_turn_and_its_prompt_from_history(self):
         memory = ConversationMemory(max_turns=2)
         memory.add_user_message("question with blank reply")
@@ -80,10 +98,15 @@ class LocalBrainTests(unittest.TestCase):
         self.assertEqual(
             post.call_args.kwargs["json"]["messages"],
             [
+                {
+                    "role": "system",
+                    "content": ANY,
+                },
                 {"role": "user", "content": "previous"},
                 {"role": "user", "content": "new question"},
             ],
         )
+        self.assertIn("never claim you searched", post.call_args.kwargs["json"]["messages"][0]["content"].lower())
         response.raise_for_status.assert_called_once_with()
 
     @patch("Brain.local.requests.post", side_effect=requests.exceptions.ConnectTimeout)
@@ -135,7 +158,7 @@ class RequirementClassifierTests(unittest.TestCase):
 
 class BridgeTests(unittest.TestCase):
     def test_process_passes_history_and_saves_exchange(self):
-        bridge = NanoBridge()
+        bridge = NanoAssistant()
         bridge.memory = ConversationMemory(max_turns=2)
         bridge.classifier = Mock()
         bridge.classifier.classify.return_value = {
@@ -146,7 +169,7 @@ class BridgeTests(unittest.TestCase):
         bridge.brain = Mock()
         bridge.brain.generate.return_value = "hello back"
 
-        self.assertEqual(bridge.process("hello"), "hello back")
+        self.assertEqual(run_assistant(bridge, "hello"), "hello back")
         self.assertEqual(
             bridge.memory.get_ollama_history(),
             [
@@ -159,7 +182,7 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(bridge.last_classification["task_type"], "conversation")
 
     def test_model_error_is_not_saved_as_a_conversation_turn(self):
-        bridge = NanoBridge()
+        bridge = NanoAssistant()
         bridge.memory = ConversationMemory(max_turns=2)
         bridge.classifier = Mock()
         bridge.classifier.classify.return_value = {
@@ -170,18 +193,18 @@ class BridgeTests(unittest.TestCase):
         bridge.brain = Mock()
         bridge.brain.generate.return_value = "[Nano] Ollama returned an empty answer."
 
-        result = bridge.process("hello")
+        result = run_assistant(bridge, "hello")
 
         self.assertIn("empty answer", result)
         self.assertEqual(bridge.memory.count(), 0)
 
     def test_classifier_failure_stops_before_answer_model(self):
-        bridge = NanoBridge()
+        bridge = NanoAssistant()
         bridge.classifier = Mock()
         bridge.classifier.classify.side_effect = RequirementClassificationError("invalid JSON")
         bridge.brain = Mock()
 
-        result = bridge.process("hello")
+        result = run_assistant(bridge, "hello")
 
         self.assertIn("classification failed", result)
         bridge.brain.generate.assert_not_called()
