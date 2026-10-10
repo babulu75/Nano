@@ -1,3 +1,4 @@
 requests
 python-dotenv
-psutil
+playwright>=1.40
+pytest>=8.0
